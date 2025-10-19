@@ -59,7 +59,7 @@ if not PASTA_FEATURES:
 # ==============================================================================
 # conjunto de features
 MAX_DIM_A_TESTAR = 1024
-N_NODES_A_TESTAR = 25  
+N_NODES_A_TESTAR = 100  
 
 # Parâmetros de Treinamento
 EPOCHS = 90

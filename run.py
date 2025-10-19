@@ -8,7 +8,6 @@ from treino.treinar_com_brm import main
 
 from treino.treinar_com_gatconv import main as main_gat
 
-
 # from treino.treinar_random_forest import treinar_rf
 
 from features.gerar_features_hierarquico import gerar_features_hierarquico

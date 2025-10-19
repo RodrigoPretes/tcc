@@ -61,7 +61,7 @@ if not ARQUIVO_MANIFEST or not DATASET_IMAGES_PATH or not PASTA_FEATURES:
 NUM_WORKERS = 4
 
 LISTA_MAX_DIM = [1024]
-LISTA_N_NODES = [25]
+LISTA_N_NODES = [100]
 
 
 def pre_processar_imagem(caminho_final_encontrado, max_dim):
