@@ -1,6 +1,9 @@
-Metadata-Version: 2.1
+Metadata-Version: 2.4
 Name: DISF
 Version: 1.0
 Summary: Dynamic and Iterative Spanning Forest for superpixel segmentation
 Author: Felipe Belem
 License-File: LICENSE
+Dynamic: author
+Dynamic: license-file
+Dynamic: summary

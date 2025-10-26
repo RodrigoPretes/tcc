@@ -14,17 +14,7 @@ from skimage import data, io, color
 from torchvision.datasets import CIFAR10
 from skimage.segmentation import slic, mark_boundaries
 from skimage.measure import find_contours, regionprops, label
-# Importação direta do DISF, agora que está instalado no venv
-try:
-    import disf
-    if hasattr(disf, 'compute_superpixels'):
-        print("Atributo 'compute_superpixels' encontrado no módulo 'disf'.")
-    else:
-        print("Atributo 'compute_superpixels' NÃO encontrado no módulo 'disf'.")
-except ImportError as e:
-    print(f"ERRO: Não foi possível importar o módulo 'disf'")
-    print(f"Detalhes do erro: {e}")
-    disf = None  # Define 'disf' como None se a importação falhar
+
 
 NP_TORCH_FLOAT_DTYPE = np.float32
 NP_TORCH_LONG_DTYPE = np.int64

@@ -85,7 +85,7 @@ static PyObject* DISF_Superpixels(PyObject* self, PyObject* args)
     if(n_0 < n_f) 
         return PyErr_Format(PyExc_ValueError, "N0 must be >> Nf!");
     
-    ndim = PyArray_NDIM(in_arr);
+    ndim = PyArray_NDIM((PyArrayObject*)in_arr);
     dims = (npy_intp *)PyArray_DIMS(in_arr);
 
     if(ndim < 2 || ndim > 3) return PyErr_Format(PyExc_Exception, "The number of dimensions must be either 2 or 3!");
@@ -143,7 +143,7 @@ PyObject *createPyObjectFromGrayImage(Image *img)
 
     dims = (npy_intp *)malloc(2 * sizeof(npy_intp));
     dims[0] = img->num_rows; dims[1] = img->num_cols;
-    pyobj = (PyObject *)PyArray_SimpleNew(2, dims, PyArray_INT);
+    pyobj = (PyObject *)PyArray_SimpleNew(2, dims, NPY_INT);
 
     #pragma omp parallel for
     for(int y = 0; y < img->num_rows; ++y)
