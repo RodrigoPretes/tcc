@@ -27,7 +27,7 @@ class MultiGraphData(Data):
 # Escolha o tipo de lesão: "MASS" ou "CALC"
 TIPO_LESÃO = "MASS" 
 # Escolha o tipo de segmentação/grafo: "SLIC" ou "DISF"
-TIPO_SEGMENTAÇÃO = "SLIC" 
+TIPO_SEGMENTAÇÃO = "DISF" 
 
 # Lendo caminhos do arquivo .env 
 DATASET_IMAGES_PATH = config("DATASET_IMAGES_PATH")

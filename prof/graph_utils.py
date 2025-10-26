@@ -209,222 +209,256 @@ def mask_to_bbox(mask, image, mask_n, debug=False):
         raise ValueError("More region features than expected !!!!!") #165
     return np.asarray(features)
 
-def RAG(image,n_nodes=6):
-    NUM_FEATURES=103
+def RAG(image, n_nodes=6):
+    """
+    Gera o Grafo de Adjacência de Regiões (RAG) usando o algoritmo SLIC
+    com adaptação automática para segmentação patch-wise em imagens grandes.
+    """
+    from prof.utils_patchwise import segmentar_por_patches
 
-    super_pixel = slic(image, n_segments=n_nodes, slic_zero=True, channel_axis=2)
-    label_img=super_pixel
+    NUM_FEATURES = 103
 
-    asegments = np.array(label_img)
-    g = graph.rag_mean_color(image, label_img)
-    
-    image_features=image
+    # --- Escolha automática do método de segmentação ---
+    H, W = image.shape[:2]
+    use_patchwise = (H > 2500 or W > 2500)  # threshold adaptável
+
+    if use_patchwise:
+        print(f"[INFO] Imagem grande detectada ({H}x{W}), aplicando segmentação patch-wise SLIC...")
+        asegments = segmentar_por_patches(
+            image,
+            n_nodes=n_nodes,
+            segmentador="SLIC",
+            slic_fn=slic,
+            grid=(2, 2)  # Ajustável: (3,2) para imagens largas
+        )
+    else:
+        # Segmentação SLIC normal
+        label_img = slic(image, n_segments=n_nodes, slic_zero=True, channel_axis=2)
+        asegments = np.array(label_img, dtype=np.int32)
+
+    # --- Construção de adjacência rala diretamente do rótulo ---
+    from skimage.segmentation import find_boundaries
+
+    boundaries = find_boundaries(asegments, mode="thick")
+    H, W = asegments.shape
+    neigh = set()
+
+    ys, xs = np.nonzero(boundaries)
+    for y, x in zip(ys, xs):
+        a = asegments[y, x]
+        if y + 1 < H:
+            b = asegments[y + 1, x]
+            if a != b:
+                u, v = (a, b) if a < b else (b, a)
+                neigh.add((u, v))
+        if x + 1 < W:
+            b = asegments[y, x + 1]
+            if a != b:
+                u, v = (a, b) if a < b else (b, a)
+                neigh.add((u, v))
+
+    # --- Vetorização do cálculo de features ---
+    image_features = image
     greyscale_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    img_blur = cv2.GaussianBlur(greyscale_image, (3,3), sigmaX=0, sigmaY=0) 
-    # sobelxy = cv2.Sobel(src=img_blur, ddepth=cv2.CV_64F, dx=1, dy=1, ksize=3)
-    canny = cv2.Canny(image=img_blur, threshold1=100, threshold2=200) 
-    num_nodes = np.max(label_img) #número de superpixels
-    nodes = { #inicializa a lista de vértices
+    img_blur = cv2.GaussianBlur(greyscale_image, (3, 3), 0)
+    canny = cv2.Canny(image=img_blur, threshold1=100, threshold2=200)
+
+    num_nodes = np.max(asegments)
+    nodes = {
         node: {
-            "rgb_list": [],
-            "pos_list": [],
-            "histogram": np.zeros((8,)),
-            "props_features": np.zeros((22,)),
-            "texture_features": np.zeros((68,)),
-            "regions": [],
-        } for node in range(num_nodes)
+            "rgb_sum": np.zeros(3, dtype=np.float64),
+            "pos_sum": np.zeros(2, dtype=np.float64),
+            "count": 0,
+        }
+        for node in range(num_nodes)
     }
 
-    height = image.shape[0] #altura da imagem   
-    width = image.shape[1]  #largura da imagem
-    for y in range(height):
-        for x in range(width):
-            node = asegments[y,x]-1
-            rgb = image_features[y,x,:]
-            pos = np.array([float(x),float(y)])
-            nodes[node]["rgb_list"].append(rgb) #adiciona a informação de cor referente a cada pixel do superpixel
-            nodes[node]["pos_list"].append(pos) #adiciona a informação de posição referente a cada pixel do superpixel
-    
-    G = nx.Graph()     
-    mask_n = 0                      
-    for node in nodes:
-        # if (node!=0):
-        nodes[node]["rgb_list"] = np.stack(nodes[node]["rgb_list"])
-        nodes[node]["pos_list"] = np.stack(nodes[node]["pos_list"])
-        # rgb
-        rgb_mean = np.mean(nodes[node]["rgb_list"], axis=0) #média de RGB
-        pos_mean = np.mean(nodes[node]["pos_list"], axis=0) #média da posição dos pixels pertecentes ao superpixel
-        nodes[node]["histogram"] = get_histogram(image_features, np.where(asegments==node+1, 255, 0))
-        nodes[node]["props_features"] = mask_to_bbox(np.where(asegments==node+1, 255, 0), image_features, mask_n, False)
-        nodes[node]["texture_features"] = texture_features(greyscale_image, np.where(asegments==node+1, 255, 0), canny)
-        mask_n+=1
-            
+    ys, xs = np.nonzero(asegments + 1)
+    pixels_rgb = image[ys, xs]
+    labels = asegments[ys, xs]
+
+    for idx, lbl in enumerate(labels):
+        nodes[lbl]["rgb_sum"] += pixels_rgb[idx]
+        nodes[lbl]["pos_sum"] += np.array([xs[idx], ys[idx]], dtype=np.float64)
+        nodes[lbl]["count"] += 1
+
+    h = np.zeros((num_nodes, NUM_FEATURES), dtype=NP_TORCH_FLOAT_DTYPE)
+
+    mask_n = 0
+    for node_idx, node_data in nodes.items():
+        if node_data["count"] == 0:
+            continue
+
+        rgb_mean = node_data["rgb_sum"] / node_data["count"]
+        pos_mean = node_data["pos_sum"] / node_data["count"]
+        mask = (asegments == node_idx).astype(np.uint8) * 255
+
+        histogram = get_histogram(image_features, mask)
+        try:
+            props_features = mask_to_bbox(mask, image_features, mask_n, False)
+        except (ValueError, IndexError):
+            props_features = np.zeros((22,), dtype=np.float32)
+        texture = texture_features(greyscale_image, mask, canny)
+        mask_n += 1
+
         features = np.concatenate(
-        [
-            np.reshape(rgb_mean, -1),   #3 features (1 para cada canal)
-            nodes[node]["histogram"],
-            np.reshape(pos_mean, -1),   #2 features (1 para cada eixo)
-            nodes[node]["texture_features"],
-            nodes[node]["props_features"],
-        ]
+            [
+                rgb_mean.flatten(),
+                histogram,
+                pos_mean.flatten(),
+                texture,
+                props_features,
+            ]
         )
-        G.add_node(node, features = list(features))
-    #end
-    
-    n = len(G.nodes)
-    h = np.zeros([n,NUM_FEATURES]).astype(NP_TORCH_FLOAT_DTYPE)
-    for j in G.nodes:
-        h[j,:] = G.nodes[j]["features"]
-    del G
-    edge_list = list(g.edges()) 
-    n_edges = len(list(g.edges()))
-    edges = np.zeros([(2*n_edges),2]).astype(NP_TORCH_LONG_DTYPE)
-    edge_features = np.zeros((edges.shape[0],1)).astype(NP_TORCH_FLOAT_DTYPE)
-    i=0
-    for e,(s,t) in enumerate(edge_list): 
-        dist=np.linalg.norm(h[s-1]-h[t-1])
-        # neighbors_s = [x - 1 for x in list(g.adj[s].keys())]
-        # neighbors_t = [x - 1 for x in list(g.adj[t].keys())]
+        h[node_idx, :] = features.astype(NP_TORCH_FLOAT_DTYPE, copy=False)
 
-        # suport_s = np.ones((len(neighbors_s),h.shape[1]))
-        # suport_t = np.ones((len(neighbors_t),h.shape[1]))
+    # --- Construção de arestas (sem np.append, esparso, linear) ---
+    edges_list = []
+    edge_feat_list = []
 
-        # aux_s = suport_s*h[s-1]
-        # dist_s = np.linalg.norm(np.take(h, neighbors_s, 0)-aux_s, axis=1)
-        # mean_s = np.mean(dist_s)
+    for u, v in neigh:
+        dist = np.linalg.norm(h[u] - h[v])
+        edges_list.append((u, v))
+        edges_list.append((v, u))
+        edge_feat_list.append(dist)
+        edge_feat_list.append(dist)
 
-        # aux_t = suport_t*h[t-1]
-        # dist_t = np.linalg.norm(np.take(h, neighbors_t, 0)-aux_t, axis=1)
-        # mean_t = np.mean(dist_t)
+    edges = np.array(edges_list, dtype=NP_TORCH_LONG_DTYPE)
+    edge_features = np.array(edge_feat_list, dtype=NP_TORCH_FLOAT_DTYPE).reshape(-1, 1)
 
-        edges[i,0] = s-1
-        edges[i,1] = t-1
-        edge_features[i] = dist
-        i=i+1
+    return h, edges.T, edge_features, h[:, 11:13]
 
-        edges[i,0] = t-1
-        edges[i,1] = s-1
-        edge_features[i] = dist
-        i=i+1
-    
-    return h, edges.T, edge_features, h[:,11:13] 
+
 
 def RAG_DISF(image, n_nodes=100):
     """
     Gera o Grafo de Adjacência de Regiões (RAG) usando o algoritmo DISF 
     para segmentação, em vez do SLIC.
     """
+    from prof.utils_patchwise import segmentar_por_patches
+
     NUM_FEATURES = 103
 
     if disf is None:
         raise RuntimeError("O módulo DISF não foi carregado corretamente.")
 
-    image_int32 = image.astype(np.int32)
-    
-    num_sementes_inicial = max(n_nodes * 2, 200)
-    
-    super_pixel, _ = disf.DISF_Superpixels(
-        image_int32,
-        num_sementes_inicial,
-        n_nodes 
-    )
+    H, W = image.shape[:2]
+    use_patchwise = (H > 2500 or W > 2500)  # limiar de segurança
 
-    label_img = super_pixel  
-    
-    asegments = np.array(label_img) + 1
-    g = graph.rag_mean_color(image, asegments)
+    if use_patchwise:
+        # Segmentação patchwise (divide em subimagens e reconstrói)
+        print(f"[INFO] Imagem grande detectada ({H}x{W}), aplicando segmentação patch-wise DISF...")
+        asegments = segmentar_por_patches(
+            image,
+            n_nodes=n_nodes,
+            segmentador="DISF",
+            disf_module=disf,
+            grid=(2, 2)  # você pode ajustar (3,2) para imagens mais largas
+        )
+    else:
+        # Segmentação padrão (imagem inteira)
+        image_int32 = image.astype(np.int32)
+        num_sementes_inicial = max(n_nodes * 2, 200)
 
-    image_features = image
+        super_pixel, _ = disf.DISF_Superpixels(
+            image_int32,
+            num_sementes_inicial,
+            n_nodes
+        )
+        asegments = np.array(super_pixel, dtype=np.int32)
+
+    # --- Construção de adjacência rala diretamente do rótulo ---
+    from skimage.segmentation import find_boundaries
+
+    boundaries = find_boundaries(asegments, mode="thick")
+    H, W = asegments.shape
+    neigh = set()
+
+    ys, xs = np.nonzero(boundaries)
+    for y, x in zip(ys, xs):
+        a = asegments[y, x]
+        if y + 1 < H:
+            b = asegments[y + 1, x]
+            if a != b:
+                u, v = (a, b) if a < b else (b, a)
+                neigh.add((u, v))
+        if x + 1 < W:
+            b = asegments[y, x + 1]
+            if a != b:
+                u, v = (a, b) if a < b else (b, a)
+                neigh.add((u, v))
+
+    # --- Cálculo das features dos nós ---
     greyscale_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    img_blur = cv2.GaussianBlur(greyscale_image, (3,3), sigmaX=0, sigmaY=0) 
-    canny = cv2.Canny(image=img_blur, threshold1=100, threshold2=200) 
-    
-    num_nodes_reais = np.max(asegments) 
-    nodes = { 
+    img_blur = cv2.GaussianBlur(greyscale_image, (3, 3), 0)
+    canny = cv2.Canny(image=img_blur, threshold1=100, threshold2=200)
 
+    num_nodes = np.max(asegments)
+    nodes = {
         node: {
-            "rgb_list": [],
-            "pos_list": [],
-            "histogram": np.zeros((8,)),
-            "props_features": np.zeros((22,)),
-            "texture_features": np.zeros((68,)),
-        } for node in range(num_nodes_reais)
+            "rgb_sum": np.zeros(3, dtype=np.float64),
+            "pos_sum": np.zeros(2, dtype=np.float64),
+            "count": 0,
+        }
+        for node in range(num_nodes)
     }
 
-    height = image.shape[0]   
-    width = image.shape[1]  
-    for y in range(height):
-        for x in range(width):
-            node_idx = asegments[y,x]-1 
-            rgb = image_features[y,x,:]
-            pos = np.array([float(x),float(y)])
-            if node_idx < len(nodes): 
-                nodes[node_idx]["rgb_list"].append(rgb) 
-                nodes[node_idx]["pos_list"].append(pos)
+    ys, xs = np.nonzero(asegments + 1)
+    pixels_rgb = image[ys, xs]
+    labels = asegments[ys, xs]
 
-    G = nx.Graph()
+    for idx, lbl in enumerate(labels):
+        nodes[lbl]["rgb_sum"] += pixels_rgb[idx]
+        nodes[lbl]["pos_sum"] += np.array([xs[idx], ys[idx]], dtype=np.float64)
+        nodes[lbl]["count"] += 1
+
+    h = np.zeros((num_nodes, NUM_FEATURES), dtype=NP_TORCH_FLOAT_DTYPE)
+
     mask_n = 0
     for node_idx, node_data in nodes.items():
-        if not node_data["rgb_list"]:
+        if node_data["count"] == 0:
             continue
-            
-        node_data["rgb_list"] = np.stack(node_data["rgb_list"])
-        node_data["pos_list"] = np.stack(node_data["pos_list"])
-        rgb_mean = np.mean(node_data["rgb_list"], axis=0) 
-        pos_mean = np.mean(node_data["pos_list"], axis=0)
-        
-        mask = np.where(asegments == node_idx + 1, 255, 0)
-        node_data["histogram"] = get_histogram(image_features, mask)
-        try: 
-            node_data["props_features"] = mask_to_bbox(mask, image_features, mask_n, False)
-        except (ValueError, IndexError): 
-            node_data["props_features"] = np.zeros((22,)) 
 
-        node_data["texture_features"] = texture_features(greyscale_image, mask, canny)
-        mask_n+=1
-            
+        rgb_mean = node_data["rgb_sum"] / node_data["count"]
+        pos_mean = node_data["pos_sum"] / node_data["count"]
+
+        mask = (asegments == node_idx).astype(np.uint8) * 255
+
+        histogram = get_histogram(image, mask)
+        try:
+            props_features = mask_to_bbox(mask, image, mask_n, False)
+        except (ValueError, IndexError):
+            props_features = np.zeros((22,), dtype=np.float32)
+        texture = texture_features(greyscale_image, mask, canny)
+        mask_n += 1
+
         features = np.concatenate(
-        [
-            np.reshape(rgb_mean, -1),
-            node_data["histogram"],
-            np.reshape(pos_mean, -1),
-            node_data["texture_features"],
-            node_data["props_features"],
-        ]
+            [
+                rgb_mean.flatten(),
+                histogram,
+                pos_mean.flatten(),
+                texture,
+                props_features,
+            ]
         )
-        G.add_node(node_idx, features = list(features))
-    
-    n = len(G.nodes)
-    h = np.zeros([n,NUM_FEATURES]).astype(NP_TORCH_FLOAT_DTYPE)
+        h[node_idx, :] = features.astype(NP_TORCH_FLOAT_DTYPE, copy=False)
 
-    node_map = {node_id: i for i, node_id in enumerate(sorted(G.nodes()))}
-    
-    for node_id, i in node_map.items():
-        if 'features' in G.nodes[node_id]:
-            h[i, :] = G.nodes[node_id]['features']
-    
-    edge_list = list(g.edges()) 
-    n_edges = len(list(g.edges()))
-    edges = np.zeros([(2*n_edges),2]).astype(NP_TORCH_LONG_DTYPE)
-    edge_features = np.zeros((edges.shape[0],1)).astype(NP_TORCH_FLOAT_DTYPE)
-    i=0
-    for e,(s,t) in enumerate(edge_list): 
+    # --- Arestas diretas e leves ---
+    edges_list = []
+    edge_feat_list = []
 
-        s_idx = node_map.get(s-1)
-        t_idx = node_map.get(t-1)
-        
-        if s_idx is not None and t_idx is not None:
-            dist=np.linalg.norm(h[s_idx]-h[t_idx])
-            edges[i,0] = s_idx
-            edges[i,1] = t_idx
-            edge_features[i] = dist
-            i=i+1
-            edges[i,0] = t_idx
-            edges[i,1] = s_idx
-            edge_features[i] = dist
-            i=i+1
+    for u, v in neigh:
+        dist = np.linalg.norm(h[u] - h[v])
+        edges_list.append((u, v))
+        edges_list.append((v, u))
+        edge_feat_list.append(dist)
+        edge_feat_list.append(dist)
 
-    return h, edges[:i].T, edge_features[:i], h[:,11:13], None
+    edges = np.array(edges_list, dtype=NP_TORCH_LONG_DTYPE)
+    edge_features = np.array(edge_feat_list, dtype=NP_TORCH_FLOAT_DTYPE).reshape(-1, 1)
+
+    return h, edges.T, edge_features, h[:, 11:13], None
+
     
 def MG_superpixel_hierarchy(image, n_nodes, canonized=True):
     NUM_FEATURES=104
@@ -477,13 +511,14 @@ def MG_superpixel_hierarchy(image, n_nodes, canonized=True):
     width = image.shape[1]  #largura da imagem
     mask_n=0
     #percorre os vertices que que sao superpixels
-    for y in range(height):
-        for x in range(width):
-            node = asegments[y,x]-1
-            rgb = image_features[y,x,:]
-            pos = np.array([float(x),float(y)])
-            nodes[node]["rgb_list"].append(rgb) #adiciona a informação de cor referente a cada pixel do superpixel
-            nodes[node]["pos_list"].append(pos) #adiciona a informação de posição referente a cada pixel do superpixel
+    ys, xs = np.nonzero(asegments + 1)
+    pixels_rgb = image_features[ys, xs]
+    labels = asegments[ys, xs] - 1
+
+    for lbl in np.unique(labels):
+        mask = (labels == lbl)
+        nodes[lbl]["rgb_list"] = pixels_rgb[mask]
+        nodes[lbl]["pos_list"] = np.stack((xs[mask], ys[mask]), axis=1).astype(np.float32)
             
     for n in tree.leaves_to_root_iterator():
         if(not tree.is_leaf(n)): #
